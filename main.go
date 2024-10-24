@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -9,7 +10,7 @@ import (
 const messagesAmountPerGoroutine int = 5
 
 // Функция разуплотнения каналов
-func demultiplexingFunc(dataSourceChan chan int, amount int) []chan int {
+func demultiplexingFunc(done chan struct{}, dataSourceChan chan int, amount int) []chan int {
 	var output = make([]chan int, amount)
 	// Обратите внимание: вышеприведённая команда инициализирует слайс,
 	// но не инициализирует каждый его элемент. Каждый элемент будет
@@ -39,15 +40,13 @@ func demultiplexingFunc(dataSourceChan chan int, amount int) []chan int {
 		// канал-источник
 		// данных
 		// закрываем все каналы-потребители
-		for _, c := range output {
-			close(c)
-		}
+		close(done)
 	}()
 	return output
 }
 
 // Функция уплотнения каналов
-func multiplexingFunc(channels ...chan int) <-chan int {
+func multiplexingFunc(done chan struct{}, channels ...chan int) <-chan int {
 	var wg sync.WaitGroup
 	// Общий канал, в который будут попадать сообщения от всех
 	// источников
@@ -55,12 +54,23 @@ func multiplexingFunc(channels ...chan int) <-chan int {
 	// внешним кодом
 	multiplexedChan := make(chan int)
 	multiplex := func(c <-chan int) {
-		defer wg.Done()
-		for i := range c {
-			// Если поступило сообщение из одного из
-			// каналов-источников,
-			// перенаправляем его в общий канал
-			multiplexedChan <- i
+		defer func() {
+			log.Println("consumer stopped")
+			wg.Done()
+		}()
+		// Если поступило сообщение из одного из
+		// каналов-источников,
+		// перенаправляем его в общий канал
+		for {
+			select {
+			case msg, ok := <-c:
+				if !ok {
+					return
+				}
+				multiplexedChan <- msg
+			case <-done:
+				return
+			}
 		}
 	}
 	wg.Add(len(channels))
@@ -78,6 +88,7 @@ func multiplexingFunc(channels ...chan int) <-chan int {
 }
 
 func main() {
+	var done = make(chan struct{})
 	// Горутина — источник данных
 	// Функция создаёт свой собственный канал
 	// и посылает в него пять сообщений
@@ -98,8 +109,8 @@ func main() {
 		return c
 	}
 	// Запускаем источник данных и уплотняем каналы
-	var consumers []chan int = demultiplexingFunc(startDataSource(), 5)
-	c := multiplexingFunc(consumers...)
+	var consumers []chan int = demultiplexingFunc(done, startDataSource(), 5)
+	c := multiplexingFunc(done, consumers...)
 	// Централизованно получаем сообщения от всех нужных нам
 	// источников
 	// данных
